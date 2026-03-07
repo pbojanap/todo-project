@@ -48,4 +48,4 @@ Styling uses Tailwind CSS v4 via PostCSS (`@tailwindcss/postcss`). No test frame
 - Never batch everything into one giant commit
 - Commit each logical unit of work separately
 - Always stage all relevant files before committing (`git add -A`)
-- Do not push — only local commits unless asked
+- Always push to the remote GitHub repo after every commit (`git push`)
