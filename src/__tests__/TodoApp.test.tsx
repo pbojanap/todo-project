@@ -2,28 +2,90 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import TodoApp from '../components/TodoApp';
-import type { Todo } from '../types/todo';
 
-// ─── localStorage mock ────────────────────────────────────────────────────────
+// ─── In-memory Supabase mock ──────────────────────────────────────────────────
 
-const mockStore = new Map<string, string>();
-
-const localStorageMock = {
-  getItem: vi.fn((key: string) => mockStore.get(key) ?? null),
-  setItem: vi.fn((key: string, value: string) => { mockStore.set(key, value); }),
-  removeItem: vi.fn((key: string) => { mockStore.delete(key); }),
-  clear: vi.fn(() => mockStore.clear()),
-  length: 0,
-  key: vi.fn(),
+type DbRow = {
+  id: string;
+  text: string;
+  quantity?: string;
+  completed: boolean;
+  created_at: string;
 };
 
-Object.defineProperty(window, 'localStorage', {
-  value: localStorageMock,
-  writable: true,
-});
+let mockDb: DbRow[] = [];
+let nextId = 1;
+
+// Chainable query builder that resolves when awaited
+function buildQuery(action: string, payload?: unknown) {
+  const filters: { field: string; op: 'eq' | 'neq'; value: unknown }[] = [];
+
+  const builder = {
+    eq(field: string, value: unknown) { filters.push({ field, op: 'eq', value }); return builder; },
+    neq(field: string, value: unknown) { filters.push({ field, op: 'neq', value }); return builder; },
+    order() { return builder; },
+    then(resolve: (v: { data: DbRow[]; error: null }) => void) {
+      if (action === 'select') {
+        let result = [...mockDb];
+        result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        resolve({ data: result, error: null });
+        return;
+      }
+      if (action === 'insert') {
+        const p = payload as { text: string; quantity?: string; completed: boolean };
+        const row: DbRow = {
+          id: String(nextId++),
+          text: p.text,
+          quantity: p.quantity,
+          completed: p.completed ?? false,
+          created_at: new Date().toISOString(),
+        };
+        mockDb.unshift(row);
+        resolve({ data: [row], error: null });
+        return;
+      }
+      if (action === 'update') {
+        const p = payload as Partial<DbRow>;
+        for (const f of filters) {
+          if (f.op === 'eq' && f.field === 'id') {
+            mockDb = mockDb.map(r => (r.id === f.value ? { ...r, ...p } : r));
+          }
+        }
+        resolve({ data: mockDb, error: null });
+        return;
+      }
+      if (action === 'delete') {
+        for (const f of filters) {
+          if (f.op === 'eq')  mockDb = mockDb.filter(r => (r as Record<string, unknown>)[f.field] !== f.value);
+          if (f.op === 'neq') mockDb = mockDb.filter(r => (r as Record<string, unknown>)[f.field] === f.value);
+        }
+        resolve({ data: mockDb, error: null });
+        return;
+      }
+      resolve({ data: [], error: null });
+    },
+  };
+  return builder;
+}
+
+vi.mock('@/lib/supabase', () => ({
+  supabase: {
+    from: (_table: string) => ({
+      select: () => buildQuery('select'),
+      insert: (payload: unknown) => buildQuery('insert', payload),
+      update: (payload: unknown) => buildQuery('update', payload),
+      delete: () => buildQuery('delete'),
+    }),
+    channel: () => ({ on: () => ({ subscribe: () => ({}) }) }),
+    removeChannel: () => {},
+  },
+}));
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  mockStore.clear();
+  mockDb = [];
+  nextId = 1;
   vi.clearAllMocks();
 });
 
@@ -31,10 +93,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helper ───────────────────────────────────────────────────────────────────
 
-async function addTodo(user: ReturnType<typeof userEvent.setup>, text: string) {
-  const input = screen.getByPlaceholderText(/add a new task/i);
+async function addItem(user: ReturnType<typeof userEvent.setup>, text: string) {
+  const input = screen.getByPlaceholderText(/add an item/i);
   await user.type(input, text);
   await user.keyboard('{Enter}');
 }
@@ -43,89 +105,99 @@ async function addTodo(user: ReturnType<typeof userEvent.setup>, text: string) {
 
 describe('TodoApp', () => {
   describe('Empty state', () => {
-    it('renders empty state when no todos exist', () => {
+    it('renders empty state when no items exist', async () => {
       render(<TodoApp />);
-      expect(screen.getByText(/no tasks yet/i)).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      expect(screen.getByText(/no items yet/i)).toBeInTheDocument();
     });
 
-    it('renders empty state for Active filter when all todos are complete', async () => {
+    it('renders empty state for Active filter when all items are complete', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Done task');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Done task');
       await user.click(screen.getByLabelText('Mark as complete'));
       await user.click(screen.getByRole('button', { name: 'Active' }));
-      expect(screen.getByText(/no active tasks/i)).toBeInTheDocument();
+      expect(screen.getByText(/no active items/i)).toBeInTheDocument();
     });
 
-    it('renders empty state for Completed filter when no todos are complete', async () => {
+    it('renders empty state for Completed filter when no items are complete', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Pending task');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Pending task');
       await user.click(screen.getByRole('button', { name: 'Completed' }));
-      expect(screen.getByText(/no completed tasks/i)).toBeInTheDocument();
+      expect(screen.getByText(/no completed items/i)).toBeInTheDocument();
     });
   });
 
-  describe('Adding todos', () => {
-    it('adds a new todo on Enter key press', async () => {
+  describe('Adding items', () => {
+    it('adds a new item on Enter key press', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Buy groceries');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Buy groceries');
       expect(screen.getByText('Buy groceries')).toBeInTheDocument();
     });
 
-    it('adds a new todo on Add button click', async () => {
+    it('adds a new item on Add button click', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      const input = screen.getByPlaceholderText(/add a new task/i);
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      const input = screen.getByPlaceholderText(/add an item/i);
       await user.type(input, 'Read a book');
       await user.click(screen.getByRole('button', { name: /^add$/i }));
       expect(screen.getByText('Read a book')).toBeInTheDocument();
     });
 
-    it('does not add a whitespace-only todo', async () => {
+    it('does not add a whitespace-only item', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      const input = screen.getByPlaceholderText(/add a new task/i);
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      const input = screen.getByPlaceholderText(/add an item/i);
       await user.type(input, '   ');
       await user.keyboard('{Enter}');
-      expect(screen.getByText(/no tasks yet/i)).toBeInTheDocument();
+      expect(screen.getByText(/no items yet/i)).toBeInTheDocument();
     });
 
     it('clears the input field after adding', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      const input = screen.getByPlaceholderText(/add a new task/i);
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      const input = screen.getByPlaceholderText(/add an item/i);
       await user.type(input, 'Clean house');
       await user.keyboard('{Enter}');
       expect(input).toHaveValue('');
     });
   });
 
-  describe('Completing todos', () => {
-    it('marks a todo as complete when checkbox is clicked', async () => {
+  describe('Completing items', () => {
+    it('marks an item as complete when checkbox is clicked', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Walk the dog');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Walk the dog');
       await user.click(screen.getByLabelText('Mark as complete'));
       expect(screen.getByText('Walk the dog')).toHaveClass('line-through');
     });
 
-    it('unmarks a completed todo when checkbox is clicked again', async () => {
+    it('unmarks a completed item when checkbox is clicked again', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Water plants');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Water plants');
       await user.click(screen.getByLabelText('Mark as complete'));
       await user.click(screen.getByLabelText('Mark as incomplete'));
       expect(screen.getByText('Water plants')).not.toHaveClass('line-through');
     });
   });
 
-  describe('Deleting todos', () => {
-    it('removes a todo after delete is clicked', async () => {
+  describe('Deleting items', () => {
+    it('removes an item after delete is clicked', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Clean the house');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Clean the house');
 
       const item = screen.getByText('Clean the house').closest('[data-testid="todo-item"]')!;
       await user.click(within(item).getByLabelText('Delete todo'));
@@ -138,12 +210,12 @@ describe('TodoApp', () => {
   });
 
   describe('Filter tabs', () => {
-    it('All filter shows every todo', async () => {
+    it('All filter shows every item', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Task A');
-      await addTodo(user, 'Task B');
-      // Complete Task B (most recently added, appears first)
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Task A');
+      await addItem(user, 'Task B');
       const checkboxes = screen.getAllByLabelText('Mark as complete');
       await user.click(checkboxes[0]);
 
@@ -152,12 +224,12 @@ describe('TodoApp', () => {
       expect(screen.getByText('Task B')).toBeInTheDocument();
     });
 
-    it('Active filter shows only incomplete todos', async () => {
+    it('Active filter shows only incomplete items', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Active task');
-      await addTodo(user, 'Done task');
-      // Done task was added last, appears first — complete it
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Active task');
+      await addItem(user, 'Done task');
       await user.click(screen.getAllByLabelText('Mark as complete')[0]);
 
       await user.click(screen.getByRole('button', { name: 'Active' }));
@@ -165,12 +237,12 @@ describe('TodoApp', () => {
       expect(screen.queryByText('Done task')).not.toBeInTheDocument();
     });
 
-    it('Completed filter shows only completed todos', async () => {
+    it('Completed filter shows only completed items', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Pending task');
-      await addTodo(user, 'Finished task');
-      // Finished task added last, appears first — complete it
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Pending task');
+      await addItem(user, 'Finished task');
       await user.click(screen.getAllByLabelText('Mark as complete')[0]);
 
       await user.click(screen.getByRole('button', { name: 'Completed' }));
@@ -183,55 +255,20 @@ describe('TodoApp', () => {
     it('displays correct completed count', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Task 1');
-      await addTodo(user, 'Task 2');
-      // Counter appears in both header and footer — assert at least one is present
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Task 1');
+      await addItem(user, 'Task 2');
       expect(screen.getAllByText(/0 of 2 completed/i).length).toBeGreaterThanOrEqual(1);
     });
 
-    it('updates counter when a todo is completed', async () => {
+    it('updates counter when an item is completed', async () => {
       const user = userEvent.setup();
       render(<TodoApp />);
-      await addTodo(user, 'Task A');
-      await addTodo(user, 'Task B');
+      await waitFor(() => expect(screen.queryByText(/loading/i)).not.toBeInTheDocument());
+      await addItem(user, 'Task A');
+      await addItem(user, 'Task B');
       await user.click(screen.getAllByLabelText('Mark as complete')[0]);
       expect(screen.getAllByText(/1 of 2 completed/i).length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  describe('localStorage persistence', () => {
-    it('saves todos to localStorage when a todo is added', async () => {
-      const user = userEvent.setup();
-      render(<TodoApp />);
-      await addTodo(user, 'Persistent task');
-      await waitFor(() => {
-        expect(localStorageMock.setItem).toHaveBeenCalledWith(
-          'todo-app-todos',
-          expect.stringContaining('Persistent task')
-        );
-      });
-    });
-
-    it('loads todos from localStorage on mount', async () => {
-      const saved: Todo[] = [
-        { id: '1', text: 'Saved todo', completed: false, createdAt: Date.now() },
-      ];
-      localStorageMock.getItem.mockReturnValueOnce(JSON.stringify(saved));
-      render(<TodoApp />);
-      await waitFor(() => {
-        expect(screen.getByText('Saved todo')).toBeInTheDocument();
-      });
-    });
-
-    it('restores completed state from localStorage', async () => {
-      const saved: Todo[] = [
-        { id: '1', text: 'Done item', completed: true, createdAt: Date.now() },
-      ];
-      localStorageMock.getItem.mockReturnValueOnce(JSON.stringify(saved));
-      render(<TodoApp />);
-      await waitFor(() => {
-        expect(screen.getByText('Done item')).toHaveClass('line-through');
-      });
     });
   });
 });
