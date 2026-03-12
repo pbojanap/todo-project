@@ -74,6 +74,13 @@ function TodoItem({ todo, isDeleting, onToggle, onDelete }: TodoItemProps) {
         {todo.text}
       </span>
 
+      {/* Quantity badge */}
+      {todo.quantity && (
+        <span className="flex-shrink-0 text-xs font-medium text-violet-500 bg-violet-50 px-2 py-0.5 rounded-full">
+          {todo.quantity}
+        </span>
+      )}
+
       {/* Delete button */}
       <button
         onClick={() => onDelete(todo.id)}
@@ -91,6 +98,7 @@ function TodoItem({ todo, isDeleting, onToggle, onDelete }: TodoItemProps) {
 export default function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [inputValue, setInputValue] = useState('');
+  const [quantityValue, setQuantityValue] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [mounted, setMounted] = useState(false);
@@ -110,11 +118,13 @@ export default function TodoApp() {
   const addTodo = () => {
     const text = inputValue.trim();
     if (!text) return;
+    const quantity = quantityValue.trim() || undefined;
     setTodos(prev => [
-      { id: generateId(), text, completed: false, createdAt: Date.now() },
+      { id: generateId(), text, quantity, completed: false, createdAt: Date.now() },
       ...prev,
     ]);
     setInputValue('');
+    setQuantityValue('');
     inputRef.current?.focus();
   };
 
@@ -196,6 +206,14 @@ export default function TodoApp() {
                 onKeyDown={e => e.key === 'Enter' && addTodo()}
                 placeholder="Add a new task..."
                 className="flex-1 bg-white/15 text-white placeholder:text-violet-300 border border-white/25 rounded-xl px-4 py-2.5 text-sm outline-none focus:bg-white/25 focus:border-white/50 transition-all duration-200 min-w-0"
+              />
+              <input
+                type="text"
+                value={quantityValue}
+                onChange={e => setQuantityValue(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addTodo()}
+                placeholder="Qty"
+                className="w-24 flex-shrink-0 bg-white/15 text-white placeholder:text-violet-300 border border-white/25 rounded-xl px-3 py-2.5 text-sm outline-none focus:bg-white/25 focus:border-white/50 transition-all duration-200"
               />
               <button
                 onClick={addTodo}
